@@ -1,0 +1,24 @@
+# 依赖说明
+#
+# 本项目刻意保持「零运行时依赖」：
+#   - 构建器只用 Node 内置模块（fs / path / url），无需 npm install
+#   - YAML 序列化器为自实现（src/yaml.js），不引入 js-yaml
+#   - 扩展脚本自包含，无任何外部引用
+#
+# 这样做的收益：
+#   1. CI 无需安装依赖，构建耗时以秒计
+#   2. 不存在供应链风险与版本漂移
+#   3. 克隆下来即可 `node src/build.js` 直接跑
+#
+# 仅在 CI 的校验步骤中临时安装 js-yaml（--no-save），
+# 用于「用第三方解析器交叉验证自实现序列化器的输出」，
+# 属于测试手段而非运行时依赖。
+node_modules/
+*.log
+.DS_Store
+.venv/
+__pycache__/
+
+# 本地发布辅助文件（含凭据，绝不入库）
+.ghtoken*
+_push_tmp.py

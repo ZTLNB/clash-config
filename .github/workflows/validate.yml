@@ -1,0 +1,68 @@
+name: Validate
+
+# PR 门禁：任何改动合并进 main 之前必须通过校验，
+# 防止把语法错误或引用错误的配置合入。
+on:
+  pull_request:
+    paths:
+      - "config/**"
+      - "src/**"
+      - ".github/workflows/validate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: 校验配置与脚本
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: 静态校验（不写文件）
+        run: node src/build.js --check
+
+      - name: 深度校验 YAML 与脚本
+        run: |
+          npm install --no-save js-yaml@4
+          node -e "
+            const yaml = require('js-yaml');
+            const fs = require('fs');
+            const vm = require('vm');
+            require('child_process').execSync('node src/build.js', { stdio: 'inherit' });
+
+            // YAML 结构与关键字段
+            const doc = yaml.load(fs.readFileSync('dist/config.yaml', 'utf8'));
+            const required = ['proxy-groups', 'rules', 'rule-providers', 'dns', 'sniffer'];
+            for (const key of required) {
+              if (!doc[key]) throw new Error('缺少必需字段: ' + key);
+            }
+
+            // 每一条 RULE-SET 引用的规则集都必须已定义
+            const providers = new Set(Object.keys(doc['rule-providers']));
+            for (const rule of doc.rules) {
+              if (rule.startsWith('RULE-SET,')) {
+                const name = rule.split(',')[1];
+                if (!providers.has(name)) throw new Error('规则集未定义: ' + name);
+              }
+            }
+
+            // 脚本能力检查
+            const code = fs.readFileSync('dist/script.js', 'utf8');
+            const sandbox = { console, Error, Object, Array, JSON, String, Number, Boolean };
+            vm.createContext(sandbox);
+            vm.runInContext(code, sandbox, { filename: 'script.js' });
+            if (typeof sandbox.main !== 'function') throw new Error('script.js 未导出 main');
+
+            // 无代理时必须抛错（防止静默产出坏配置）
+            let threw = false;
+            try { sandbox.main({ proxies: [], rules: [] }); } catch (e) { threw = true; }
+            if (!threw) throw new Error('空代理配置未触发保护性报错');
+
+            console.log('✅ 全部校验通过');
+          "

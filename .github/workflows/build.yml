@@ -1,0 +1,135 @@
+name: Build & Publish
+
+# 触发条件：
+#   1. push 到 main 且改动涉及源码 —— 自动重建产物并提交回仓库
+#   2. 手动触发 —— 可选择性打 tag 发 Release
+#   3. 每周一凌晨定时重建 —— 即使没改代码，也刷新一次产物头里的时间戳，
+#      便于订阅端感知「配置仍然在维护」
+on:
+  push:
+    branches: [main]
+    paths:
+      - "config/**"
+      - "src/**"
+      - ".github/workflows/build.yml"
+  schedule:
+    - cron: "0 16 * * 0" # 每周日 16:00 UTC（周一 00:00 北京时间）
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "是否创建 Release 并附上产物"
+        type: boolean
+        default: false
+
+# 允许工作流向仓库写回产物 —— 这一步是「自动发布」的关键
+permissions:
+  contents: write
+
+# 同一分支上的并发构建串行化，避免两次 push 争抢提交
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 渲染配置产物
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          # 用默认 token 即可：后续提交复用同一凭据
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # ── 第一道门禁：先校验，再产出。校验不过就不写文件，避免产出坏配置 ──
+      - name: 校验配置（不写文件）
+        run: node src/build.js --check
+
+      - name: 校验生成的 YAML 语法
+        run: |
+          npm install --no-save js-yaml@4
+          node -e "
+            const yaml = require('js-yaml');
+            const fs = require('fs');
+            // --check 不产出文件，此处先正式构建一次
+            require('child_process').execSync('node src/build.js', { stdio: 'inherit' });
+            const doc = yaml.load(fs.readFileSync('dist/config.yaml', 'utf8'));
+            if (!doc || !Array.isArray(doc['proxy-groups']) || doc['proxy-groups'].length === 0) {
+              throw new Error('YAML 结构异常：proxy-groups 缺失或为空');
+            }
+            console.log('YAML 校验通过：' + doc['proxy-groups'].length + ' 个代理组 / ' + doc.rules.length + ' 条规则');
+          "
+
+      - name: 校验扩展脚本可执行
+        run: |
+          node -e "
+            const fs = require('fs'), vm = require('vm');
+            const code = fs.readFileSync('dist/script.js', 'utf8');
+            const sandbox = { console, Error, Object, Array, JSON, String, Number, Boolean };
+            vm.createContext(sandbox);
+            vm.runInContext(code, sandbox, { filename: 'script.js' });
+            if (typeof sandbox.main !== 'function') throw new Error('script.js 未导出 main 函数');
+            // 用最小配置真实跑一遍，确保运行期不抛异常
+            const out = sandbox.main({
+              proxies: [{ name: '香港01', type: 'ss', server: '1.1.1.1', port: 443, cipher: 'aes-128-gcm', password: 'x' }],
+              rules: [],
+            });
+            console.log('脚本执行通过：' + out.rules.length + ' 条规则 / ' + out['proxy-groups'].length + ' 个代理组');
+          "
+
+      # ── 自动提交产物回仓库 ──
+      - name: 提交构建产物
+        id: commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dist/
+          if git diff --cached --quiet; then
+            echo "产物无变化，跳过提交"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "chore(build): 自动重建配置产物 [skip ci]"
+            git push
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── 产物归档：即使不发 Release，也能从 Actions 页面下载 ──
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: clash-config-${{ github.sha }}
+          path: dist/
+          retention-days: 30
+
+      # ── 可选：打 tag 并发 Release ──
+      - name: 生成版本号
+        if: github.event_name == 'workflow_dispatch' && inputs.release == true
+        id: version
+        run: echo "tag=v$(date +'%Y.%m.%d')-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: 创建 Release
+        if: github.event_name == 'workflow_dispatch' && inputs.release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "配置发布 ${{ steps.version.outputs.tag }}"
+          body: |
+            自动构建的 Clash 配置产物。
+
+            - `config.yaml` —— 完整配置，带注释与生成时间
+            - `config.min.yaml` —— 紧凑版，适合作为订阅源
+            - `script.js` —— 全局扩展脚本，供客户端直接加载
+
+            提交：${{ github.sha }}
+          files: |
+            dist/config.yaml
+            dist/config.min.yaml
+            dist/script.js
+          draft: false
+          prerelease: false

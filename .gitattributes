@@ -1,0 +1,19 @@
+# 统一换行符，避免 Windows 本地与 Linux CI 之间产生无意义的整文件 diff。
+# 否则 CI 每次构建都会因 CRLF/LF 差异提交一个"假变更"。
+* text=auto eol=lf
+
+# 明确文本类型
+*.js    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+
+# 二进制文件不做转换
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.mrs   binary
+
+# GitHub Actions 与 YAML 在 diff 中正常显示
+.github/** linguist-language=YAML
